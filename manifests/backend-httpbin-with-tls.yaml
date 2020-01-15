@@ -15,10 +15,14 @@ spec:
     spec:
       containers:
       - name: httpbin
-        image: httpbin
-        imagePullPolicy: Never
+        image: tsaarni/httpbin:latest
         ports:
           - containerPort: 443
+        env:
+          - name: X_SERVER_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.name
         volumeMounts:
         - mountPath: /run/secrets/certs/
           name: httpbin-cert
@@ -30,13 +34,13 @@ spec:
         #     --cert-reqs 0 == ssl.CERT_NONE
         #     --cert-reqs 1 == ssl.CERT_OPTIONAL
         #     --cert-reqs 2 == ssl.CERT_REQUIRED
-        args: ["-c", "gunicorn -b 0.0.0.0:443 --access-logfile - --certfile /run/secrets/certs/httpbin.pem --keyfile /run/secrets/certs/httpbin-key.pem --cert-reqs 0 --ca-certs /run/secrets/certs/client-root.pem httpbin:app"]
-        #args: ["-c", "gunicorn -b 0.0.0.0:80 --access-logfile - httpbin:app"]
+        args:
+          - "-c"
+          - "gunicorn -b 0.0.0.0:443 --access-logfile - --cert-reqs 0 --certfile /run/secrets/certs/httpbin.pem --keyfile /run/secrets/certs/httpbin-key.pem httpbin:app -k gevent"
       volumes:
       - name: httpbin-cert
         secret:
-          optional: true
-          secretName: httpbin-cert
+          secretName: httpbin
 ---
 apiVersion: v1
 kind: Service
@@ -52,38 +56,38 @@ spec:
     port: 443
   selector:
     app: httpbin
-# ---
-# apiVersion: projectcontour.io/v1
-# kind: HTTPProxy
-# metadata:
-#   name: httpbin
-# spec:
-#   virtualhost:
-#     fqdn: host1.external.com
-#     tls:
-#       secretName: ingress-server-cert
-#   routes:
-#     - services:
-#         - name: httpbin
-#           port: 443
-#           validation:
-#             caSecret: ingress-ca-cert
-#             subjectName: httpbin
 ---
-apiVersion: contour.heptio.com/v1beta1
-kind: IngressRoute
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
 metadata:
   name: httpbin
 spec:
   virtualhost:
-    fqdn: host1.external.com
+    fqdn: host1.127-0-0-101.nip.io
     tls:
-      secretName: ingress-server-cert
+      secretName: ingress
   routes:
-    - match: /
-      services:
-      - name: httpbin
-        port: 443
-        validation:
-          caSecret: ingress-ca-cert
-          subjectName: httpbin
+    - services:
+        - name: httpbin
+          port: 443
+          validation:
+            caSecret: internal-root-ca
+            subjectName: httpbin
+#---
+#apiVersion: contour.heptio.com/v1beta1
+#kind: IngressRoute
+#metadata:
+#  name: httpbin
+#spec:
+#  virtualhost:
+#    fqdn: host1.127-0-0-101.nip.io
+#    tls:
+#      secretName: ingress
+#  routes:
+#    - match: /
+#      services:
+#      - name: httpbin
+#        port: 443
+#        validation:
+#          caSecret: internal-root-ca
+#          subjectName: httpbin

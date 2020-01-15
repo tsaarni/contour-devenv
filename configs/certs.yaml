@@ -1,0 +1,46 @@
+cn: client-root-ca
+---
+cn: internal-root-ca
+---
+cn: external-root-ca
+---
+cn: contour
+issuer: internal-root-ca
+sans:
+- DNS:contour
+- DNS:contour.projectcontour
+- DNS:contour.projectcontour.svc
+- DNS:contour.projectcontour.svc.cluster.local
+--- 
+cn: controlplane
+issuer: internal-root-ca
+sans:
+- DNS:controlplane
+---
+cn: envoy
+issuer: internal-root-ca
+sans:
+- DNS:envoy
+- DNS:envoy.projectcontour
+- DNS:envoy.projectcontour.svc
+- DNS:envoy.projectcontour.svc.cluster.local
+---
+cn: httpbin
+issuer: internal-root-ca
+sans:
+- DNS:httpbin
+---
+cn: ingress
+issuer: external-root-ca
+sans:
+- DNS:host1.127-0-0-101.nip.io
+- DNS:host2.127-0-0-101.nip.io
+---
+cn: client
+issuer: client-root-ca
+---
+cn: untrusted-client
+ca: false
+key_usage:
+- KeyEncipherment
+- DigitalSignature

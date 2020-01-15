@@ -1,0 +1,84 @@
+
+##############################################################################
+#
+# inital setup
+#
+
+
+#
+# cluster
+#
+kind delete cluster --name contour
+kind create cluster --config configs/kind-cluster-config.yaml --name contour
+
+#
+# certificates and keys
+#
+rm -rf certs && mkdir certs
+certyaml -d certs configs/certs.yaml
+
+# create or update secrets
+kubectl create secret tls     ingress --cert=certs/ingress.pem --key=certs/ingress-key.pem --dry-run -o yaml | kubectl apply -f -
+kubectl create secret generic httpbin --from-file=certs/httpbin.pem --from-file=certs/httpbin-key.pem --from-file=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+kubectl create secret generic internal-root-ca --from-file=ca.crt=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+kubectl create secret generic client-root-ca --from-file=ca.crt=certs/client-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+
+
+kubectl delete secret httpbin
+
+
+
+
+kubectl apply -f https://raw.githubusercontent.com/projectcontour/contour/release-1.1/examples/render/contour.yaml
+
+
+
+
+curl https://raw.githubusercontent.com/projectcontour/contour/release-1.0/examples/render/contour.yaml -o contour.yaml
+curl https://raw.githubusercontent.com/projectcontour/contour/release-1.1/examples/render/contour.yaml -o contour.yaml
+
+# change contour version to custom
+sed -i 's!image: docker.io/projectcontour/contour.*!image: localhost/contour:latest!' contour.yaml
+kubectl -n projectcontour scale deployment/contour --replicas=1
+
+
+
+kubectl -n projectcontour logs $(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') -f   # contour logs
+kubectl -n projectcontour logs $(kubectl -n projectcontour get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -f     # envoy logs
+
+
+
+# check ingress status
+kubectl get httpproxy,ingressroute
+
+
+http --verify=certs/external-root-ca.pem https://host1.127-0-0-101.nip.io/status/418
+
+echo Q | openssl s_client -CAfile certs/external-root-ca.pem -connect host1.127-0-0-101.nip.io:443 -servername host1.127-0-0-101.nip.io | openssl x509 -text -noout
+
+
+
+Debug API https://projectcontour.io/docs/master/troubleshooting/
+kubectl -n projectcontour port-forward pod/$(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') 6060
+http localhost:6060/debug/dag | dot -Tpng -o dag.png
+
+Admin interface operations https://www.envoyproxy.io/docs/envoy/latest/operations/admin
+
+kubectl -n projectcontour port-forward pod/$(kubectl -n projectcontour get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') 9001
+http localhost:9001/help
+
+
+
+# restart contour
+kubectl -n projectcontour scale deployment/contour --replicas=0 && kubectl -n projectcontour scale deployment/contour --replicas=1
+
+
+
+##############################################################################
+#
+# custom envoy
+#
+
+kind load docker-image envoy:latest --name contour
+kubectl apply -f manifests/contour-with-custom-envoy-restarter.yaml
+kubectl apply -f manifests/backend-httpbin-with-tls.yaml
