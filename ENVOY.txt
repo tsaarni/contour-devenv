@@ -1,19 +1,45 @@
 
 
 
+export WORKDIR=~/work/contour-devenv
+
+
 # copy vscode settings
 mkdir .vscode
 cp $WORKDIR/c_cpp_properties.json $WORKDIR/launch.json .vscode/
 
+
+# Toolchain instructions from here
+https://github.com/envoyproxy/envoy/blob/master/bazel/README.md
+
+# compile with clang (not gcc)
+echo "build --config=clang" >> user.bazelrc
+
+# install and setup clang
+wget http://releases.llvm.org/9.0.0/clang+llvm-9.0.0-x86_64-pc-linux-gnu.tar.xz
+sudo mkdir /usr/local/clang-9.0.0
+sudo tar xf clang+llvm-9.0.0-x86_64-pc-linux-gnu.tar.xz -C/usr/local/
+bazel/setup_clang.sh /usr/local/clang+llvm-9.0.0-x86_64-pc-linux-gnu/
+
+### there will be error WHICH CAN BE IGNORED
+###   /usr/local/clang+llvm-9.0.0-x86_64-pc-linux-gnu/bin/llvm-config:
+###   error while loading shared libraries: libz3.so.4.8: cannot open shared object file: No such file or directory
+
+
+
 # generate compile_commands.json
 ./tools/gen_compilation_database.py
 
+# fix code formatting before commit
+./tools/code_format/check_format.py fix
 
 
 # start new cluster
 kind delete cluster --name contour
 kind create cluster --config configs/kind-cluster-config.yaml --name contour
 
+# generate certificates
+certyaml --destination certs configs/certs.yaml
 
 
 #############################################################################
@@ -23,16 +49,20 @@ kind create cluster --config configs/kind-cluster-config.yaml --name contour
 
 # Development builds
 
-export WORKDIR=~/work/contour-devenv
-cd ~/work/envoy
-
 bazel build -c fastbuild //source/exe:envoy-static
 bazel build -c fastbuild -s //source/exe:envoy-static    # use -s to see compile commands
 bazel build -c fastbuild //source/restarter:restarter
 
+bazel build -c dbg //source/exe:envoy-static             # debug build
+
 # run directly on command line
 bazel-bin/source/exe/envoy-static -c bootstrap-config.yaml --service-node mynode --service-cluster -mycluster --log-level info
 
+gdb --args bazel-bin/source/exe/envoy-static -c bootstrap-config.yaml --service-node mynode --service-cluster -mycluster --log-level info            # run under debugger
+gdbserver localhost:9999 bazel-bin/source/envoy-static -c bootstrap-config.yaml --service-node mynode --service-cluster -mycluster --log-level info  # debug remotely
+
+gdb
+target remote localhost:9999
 
 # package as docker image
 cp -af bazel-bin/source/exe/envoy-static $WORKDIR/docker/envoy/envoy
@@ -43,12 +73,7 @@ kind load docker-image envoy:latest --name contour  # upload image to kind clust
 
 
 
-# Debug builds
 
-bazel build -c dbg //source/exe:envoy-static
-
-gdb --args bazel-bin/source/exe/envoy-static -c bootstrap-config.yaml --service-node mynode --service-cluster -mycluster --log-level info            # run under debugger
-gdbserver localhost:9999 bazel-bin/source/envoy-static -c bootstrap-config.yaml --service-node mynode --service-cluster -mycluster --log-level info  # debug remotely
 
 
 
@@ -67,6 +92,9 @@ docker build -f ci/Dockerfile-envoy-image -t envoy .   # only ubuntu image
 ci/docker_build.sh                                     # all images
 
 
+# run tests without IPv6
+./ci/run_envoy_docker.sh './ci/do_ci.sh bazel.dev //test/... --test_env=ENVOY_IP_TEST_VERSIONS=v4only --test_verbose_timeout_warnings '
+
 
 
 #############################################################################
@@ -76,11 +104,9 @@ ci/docker_build.sh                                     # all images
 
 
 # Build and load services for testing
-docker pull tsaarni/httpbin:latest
-kind load docker-image tsaarni/httpbin:latest --name contour
+docker pull tsaarni/httpbin:latest && kind load docker-image tsaarni/httpbin:latest --name contour
 
-docker build -f docker/envoy-control-plane-stub/Dockerfile docker/envoy-control-plane-stub -t envoy-control-plane-stub:latest
-kind load docker-image envoy-control-plane-stub --name contour
+docker build -f docker/envoy-control-plane-stub/Dockerfile docker/envoy-control-plane-stub -t envoy-control-plane-stub:latest && kind load docker-image envoy-control-plane-stub --name contour
 
 
 
@@ -94,12 +120,104 @@ kubectl create secret generic controlplane --dry-run -o yaml --from-file=certs/c
 kubectl create secret generic envoy --dry-run -o yaml --from-file=certs/envoy.pem --from-file=certs/envoy-key.pem --from-file=certs/internal-root-ca.pem | kubectl apply -f -
 
 kubectl apply -f manifests/backend-httpbin-no-tls-no-ingress.yaml
+kubectl apply -f manifests/deploy-control-plane-stub.yaml
 kubectl apply -f manifests/deploy-envoy-xds-certificate-rotation.yaml
 
 
 
 
-kubectl create configmap envoy-config --dry-run -o yaml --from-file=envoy.yaml=configs/envoy-xds-over-tls-path-source.yaml | kubectl apply -f -
+kubectl create configmap envoy-config --dry-run -o yaml --from-file=envoy.yaml=configs/envoy-xds-over-tls-path-source.yaml --from-file=configs/envoy-sds-auth-secret-tls-certicate.yaml --from-file=configs/envoy-sds-auth-secret-validation-context.yaml | kubectl apply -f -
 
 http http://host1.127-0-0-101.nip.io/status/418
 http --stream http://host1.127-0-0-101.nip.io/sse
+
+
+
+
+#############################################################################
+#
+# Debug
+#
+
+docker build -f docker/envoy-debug/Dockerfile docker/envoy-debug/ -t envoy-debug:latest && kind load docker-image envoy-debug:latest --name contour
+kubectl apply -f manifests/deploy-envoy-debug.yaml
+
+
+bazel build -c dbg //source/exe:envoy-static
+
+tar cf - bazel-bin/source/exe/envoy-static | kubectl exec -i $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- tar xvvf -
+kubectl exec -it $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- bazel-bin/source/exe/envoy-static -c /etc/envoy/envoy.yaml --service-cluster mycluster --service-node envoy --log-level debug
+
+
+kubectl port-forward $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') 9999
+kubectl exec -it $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- gdbserver localhost:9999 bazel-bin/source/exe/envoy-static -c /etc/envoy/envoy.yaml --service-cluster mycluster --service-node envoy --log-level debug
+gdb -iex "set sysroot ." -iex "target remote localhost:9999"
+
+
+kubectl delete pod -lapp=control-plane --now && kubectl logs -f -lapp=control-plane
+
+kubectl exec -it $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') bash
+
+
+
+kubectl exec -it $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- lldb-server gdbserver "*:9999" -- /bazel-bin/source/exe/envoy-static -c /etc/envoy/envoy.yaml --service-cluster mycluster --service-node envoy --log-level debug
+
+PYTHONPATH=/usr/lib/llvm-9/lib/python3.7/site-packages lldb bazel-bin/source/exe/envoy-static
+
+sudo nsenter --target $(pidof envoy-static) --net wireshark -f "port 8080" -k
+
+
+
+kubectl -n projectcontour port-forward envoy-fg4qz 9001
+http http://localhost:9001/config_dump
+
+
+
+#############################################################################
+#
+# Cert rotation
+#
+
+docker build -f docker/envoy-control-plane-stub/Dockerfile docker/envoy-control-plane-stub -t envoy-control-plane-stub:latest && kind load docker-image envoy-control-plane-stub --name contour
+docker pull tsaarni/httpbin:latest && kind load docker-image tsaarni/httpbin:latest --name contour
+docker build -f docker/envoy-debug/Dockerfile docker/envoy-debug/ -t envoy-debug:latest && kind load docker-image envoy-debug:latest --name contour
+
+kubectl create configmap envoy-config --dry-run -o yaml --from-file=envoy.yaml=configs/envoy-xds-over-tls-path-source.yaml --from-file=configs/envoy-sds-auth-secret-tls-certicate.yaml --from-file=configs/envoy-sds-auth-secret-validation-context.yaml | kubectl apply -f -
+kubectl create secret generic controlplane --dry-run -o yaml --from-file=certs/controlplane.pem --from-file=certs/controlplane-key.pem --from-file=certs/internal-root-ca.pem | kubectl apply -f -
+kubectl create secret generic envoy --dry-run -o yaml --from-file=certs/envoy.pem --from-file=certs/envoy-key.pem --from-file=certs/internal-root-ca.pem | kubectl apply -f -
+
+kubectl apply -k manifests/envoy-certificate-rotation/
+
+while inotifywait -qre close_write bazel-bin/source/exe; do
+  tar cf - bazel-bin/source/exe/envoy-static | kubectl exec -i $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- tar xvvf -
+done
+
+bazel build -c dbg //source/exe:envoy-static
+bazel build -c fastbuild //source/exe:envoy-static
+
+
+kubectl exec -it $(kubectl get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- bazel-bin/source/exe/envoy-static -c /etc/envoy/envoy.yaml --service-cluster mycluster --service-node envoy --log-level debug
+
+
+http http://host1.127-0-0-101.nip.io/status/418
+http --stream http://host1.127-0-0-101.nip.io/sse
+
+
+# re-generate envoy cert
+rm certs/envoy*pem
+certyaml --destination certs configs/certs.yaml
+kubectl create secret generic envoy --dry-run -o yaml --from-file=certs/envoy.pem --from-file=certs/envoy-key.pem --from-file=certs/internal-root-ca.pem | kubectl apply -f -
+
+
+sudo nsenter --target $(pidof envoy-static) --net wireshark -f "port 8080" -k
+
+# trigger new TLS connection
+kubectl delete pod -lapp=control-plane
+
+
+# unittest with bazel
+bazel test -c dbg //test/common/filesystem:watcher_impl_test --test_output=streamed --test_arg="-l trace"
+
+bazel test -c dbg //test/... --test_output=streamed  # run all unittests
+bazel test -c dbg --config=clang-asan //test/...     # address sanitizer
+bazel test -c dbg --config=clang-tsan //test/...     # thread sanitizer

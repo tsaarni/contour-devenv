@@ -59,6 +59,16 @@ func main() {
 		Certificates: []tls.Certificate{serverCreds},
 		ClientCAs:    caCertPool,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
+		VerifyPeerCertificate: func(certificates [][]byte, _ [][]*x509.Certificate) error {
+			for _, asn1Data := range certificates {
+				cert, err := x509.ParseCertificate(asn1Data)
+				if err != nil {
+					log.Println(err.Error())
+				}
+				log.Printf("Subject: %v, Issuer: %v, Serial: %v, NotBefore: %v, NotAfter: %v", cert.Subject, cert.Issuer, cert.SerialNumber, cert.NotBefore, cert.NotAfter)
+			}
+			return nil
+		},
 	}
 
 	grpcOpts := []grpc.ServerOption{grpc.Creds(credentials.NewTLS(tlsConfig))}

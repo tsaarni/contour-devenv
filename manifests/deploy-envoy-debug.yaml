@@ -15,7 +15,7 @@ spec:
     spec:
       containers:
         - name: envoy
-          image: envoy
+          image: envoy-debug:latest
           imagePullPolicy: Never
           ports:
             - containerPort: 80
@@ -25,15 +25,16 @@ spec:
           volumeMounts:
             - mountPath: /etc/envoy
               name: envoy-config
+            - mountPath: /certs
+              name: envoy-certs
           command: ["/bin/sh"]
           args:
           - "-c"
-          - "envoy -c /etc/envoy/envoy.yaml --service-cluster mycluster --service-node envoy --log-level debug"
+          - "sleep infinity"
       volumes:
         - name: envoy-config
-          projected:
-            sources:
-            - configMap:
-                name: envoy-config
-            - secret:
-                name: envoy
+          configMap:
+            name: envoy-config
+        - name: envoy-certs
+          secret:
+            secretName: envoy

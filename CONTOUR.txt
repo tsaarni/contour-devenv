@@ -1,35 +1,61 @@
 
-##############################################################################
-#
-# inital setup
-#
+export WORKDIR=~/work/contour-devenv
 
-
-#
-# cluster
-#
+# start new cluster
 kind delete cluster --name contour
 kind create cluster --config configs/kind-cluster-config.yaml --name contour
 
-#
-# certificates and keys
-#
-rm -rf certs && mkdir certs
-certyaml -d certs configs/certs.yaml
+# generate certificates
+certyaml --destination certs configs/certs.yaml
 
-# create or update secrets
-kubectl create secret tls     ingress --cert=certs/ingress.pem --key=certs/ingress-key.pem --dry-run -o yaml | kubectl apply -f -
-kubectl create secret generic httpbin --from-file=certs/httpbin.pem --from-file=certs/httpbin-key.pem --from-file=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+
+
+##############################################################################
+#
+# BUILDING
+#
+
+
+go checkout go.mod go.sum     # needed to if getting error: "go: updates to go.mod needed, disabled by -mod=readonly"
+make check
+
+go build -o contour -v github.com/projectcontour/contour/cmd/contour  # compile binary
+
+docker build . -t localhost/contour:latest                      # compile docker image
+kind load docker-image localhost/contour:latest --name contour  # upload image to kind cluster
+
+# run tests only for a certain package
+cd cmd/contour
+go test .
+
+
+go test -timeout 30s github.com/projectcontour/contour/cmd/contour -run "^(TestServeContextCertificateHandling)$" -v
+
+
+
+kubectl create secret generic httpbin --dry-run -o yaml --from-file=certs/httpbin.pem --from-file=certs/httpbin-key.pem | kubectl apply -f -
 kubectl create secret generic internal-root-ca --from-file=ca.crt=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
-kubectl create secret generic client-root-ca --from-file=ca.crt=certs/client-root-ca.pem --dry-run -o yaml | kubectl apply -f -
-
-
-kubectl delete secret httpbin
-
-
+kubectl create secret tls ingress --cert=certs/ingress.pem --key=certs/ingress-key.pem --dry-run -o yaml | kubectl apply -f -
 
 
 kubectl apply -f https://raw.githubusercontent.com/projectcontour/contour/release-1.1/examples/render/contour.yaml
+kubectl apply -f manifests/backend-httpbin-with-tls.yaml
+
+
+kubectl -n projectcontour create secret tls contourcert --cert=certs/contour.pem --key=certs/contour-key.pem --dry-run -o yaml | kubectl apply -f -
+kubectl -n projectcontour create secret tls envoycert --cert=certs/envoy.pem --key=certs/envoy-key.pem --dry-run -o yaml | kubectl apply -f -
+kubectl -n projectcontour create secret generic cacert --from-file=cacert.pem=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+
+kubectl -n projectcontour scale deployment/contour --replicas=1
+
+http --verify=certs/external-root-ca.pem https://host1.127-0-0-101.nip.io/status/418
+
+# capture grpc traffic
+sudo nsenter --target $(pidof contour) --net wireshark -f "port 8001" -k
+
+
+
+
 
 
 
@@ -82,3 +108,95 @@ kubectl -n projectcontour scale deployment/contour --replicas=0 && kubectl -n pr
 kind load docker-image envoy:latest --name contour
 kubectl apply -f manifests/contour-with-custom-envoy-restarter.yaml
 kubectl apply -f manifests/backend-httpbin-with-tls.yaml
+
+
+
+#################################################
+#
+# Test changes in contour
+#
+
+docker build . -t localhost/contour:latest                      # compile docker image
+kind load docker-image localhost/contour:latest --name contour  # upload image to kind cluster
+kind load docker-image tsaarni/httpbin:latest --name contour
+
+kustomize build manifests/contour-certificate-rotation/ | kubectl apply -f -
+
+kubectl -n projectcontour create secret tls contourcert --cert=certs/contour.pem --key=certs/contour-key.pem --dry-run -o yaml | kubectl apply -f -
+kubectl -n projectcontour create secret tls envoycert --cert=certs/envoy.pem --key=certs/envoy-key.pem --dry-run -o yaml | kubectl apply -f -
+kubectl -n projectcontour create secret generic cacert --from-file=cacert.pem=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+
+http --verify=certs/external-root-ca.pem https://host1.127-0-0-101.nip.io/status/418
+
+kubectl -n projectcontour exec $(kubectl -n projectcontour get pod -l app=envoy -o jsonpath='{.items[0].metadata.name}') -- openssl s_client -connect contour:8001 -CAfile /ca/cacert.pem -cert /certs/tls.crt -key /certs/tls.key | openssl x509 -text -noout
+
+
+
+#####################################################################################
+#
+# Test client authentication
+#
+
+
+docker build docker/contour-debug -t localhost/contour-debug:latest
+
+kind load docker-image localhost/contour-debug:latest --name contour
+kind load docker-image tsaarni/httpbin:latest --name contour
+
+
+kubectl create secret generic httpbin --dry-run -o yaml --from-file=certs/httpbin.pem --from-file=certs/httpbin-key.pem | kubectl apply -f -
+kubectl create secret generic internal-root-ca --from-file=ca.crt=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+kubectl create secret tls ingress --cert=certs/ingress.pem --key=certs/ingress-key.pem --dry-run -o yaml | kubectl apply -f -
+
+cat certs/client-root-ca-1.pem certs/client-root-ca-2.pem | kubectl create secret generic client-root-ca --from-file=ca.crt=/dev/stdin --dry-run -o yaml | kubectl apply -f -
+
+
+kustomize build manifests/contour-client-authentication-dev | kubectl apply -f -
+
+
+cd ~/work/contour
+# disable compiler optimizations and inlining
+go build -gcflags '-N -l' -o contour -v github.com/projectcontour/contour/cmd/contour
+
+
+# run on separate terminal to upload new builds
+while inotifywait -qre close_write .; do
+    tar cf - contour | \
+    kubectl -n projectcontour exec -i $(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') -- tar xvvf -
+done
+
+
+# forward debugger port from kubernetes
+kubectl -n projectcontour port-forward $(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') 8181
+
+
+kubectl -n projectcontour exec -it $(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') -- dlv exec /contour --headless --api-version=2 --log --listen 0.0.0.0:8181 -- serve --incluster --use-extensions-v1beta1-ingress --xds-address=0.0.0.0 --xds-port=8001 --envoy-service-http-port=80 --envoy-service-https-port=443 --contour-cafile=/ca/cacert.pem --contour-cert-file=/certs/tls.crt --contour-key-file=/certs/tls.key --config-path=/config/contour.yaml
+
+
+
+kubectl -n projectcontour exec -it $(kubectl -n projectcontour get pod -l app=contour -o jsonpath='{.items[0].metadata.name}') -- /contour serve --incluster --use-extensions-v1beta1-ingress --xds-address=0.0.0.0 --xds-port=8001 --envoy-service-http-port=80 --envoy-service-https-port=443 --contour-cafile=/ca/cacert.pem --contour-cert-file=/certs/tls.crt --contour-key-file=/certs/tls.key --config-path=/config/contour.yaml
+
+
+http --verify=certs/external-root-ca.pem https://host1.127-0-0-101.nip.io/status/418
+http --cert=certs/client-1.pem --cert-key=certs/client-1-key.pem --verify=certs/external-root-ca.pem https://protected.127-0-0-101.nip.io/status/418
+http --cert=certs/client-2.pem --cert-key=certs/client-2-key.pem --verify=certs/external-root-ca.pem https://protected.127-0-0-101.nip.io/status/418
+http --cert=certs/untrusted-client.pem --cert-key=certs/untrusted-client-key.pem --verify=certs/external-root-ca.pem https://protected.127-0-0-101.nip.io/status/418
+
+
+######
+# with container
+
+make container
+docker tag projectcontour/contour:v1.3.0-31-ga06e386e projectcontour/contour:latest    # replace the tag with output from makefile
+kind load docker-image projectcontour/contour:latest --name contour
+kind load docker-image tsaarni/httpbin:latest --name contour
+
+kubectl create secret generic httpbin --dry-run -o yaml --from-file=certs/httpbin.pem --from-file=certs/httpbin-key.pem | kubectl apply -f -
+kubectl create secret generic internal-root-ca --from-file=ca.crt=certs/internal-root-ca.pem --dry-run -o yaml | kubectl apply -f -
+kubectl create secret tls ingress --cert=certs/ingress.pem --key=certs/ingress-key.pem --dry-run -o yaml | kubectl apply -f -
+cat certs/client-root-ca-1.pem certs/client-root-ca-2.pem | kubectl create secret generic client-root-ca --from-file=ca.crt=/dev/stdin --dry-run -o yaml | kubectl apply -f -
+
+cp ../contour/examples/render/contour.yaml manifests/contour-client-authentication-release/ 
+kustomize build manifests/contour-client-authentication-release | kubectl apply -f -
+
+

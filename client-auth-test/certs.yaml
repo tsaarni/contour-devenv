@@ -1,0 +1,32 @@
+subject: cn=client-root-ca-1
+---
+subject: cn=client-root-ca-2
+---
+subject: cn=ingress-root-ca
+---
+subject: cn=ingress
+issuer: cn=ingress-root-ca
+sans:
+- DNS:not-protected.127-0-0-101.nip.io
+- DNS:protected.127-0-0-101.nip.io
+- DNS:protected-tcpproxy.127-0-0-101.nip.io
+- DNS:protected-tcpproxy-passthrough.127-0-0-101.nip.io
+- DNS:protected-permitinsecure.127-0-0-101.nip.io
+---
+subject: cn=trusted-client-1
+issuer: cn=client-root-ca-1
+key_usage:
+- KeyEncipherment
+- DigitalSignature
+---
+subject: cn=trusted-client-2
+issuer: cn=client-root-ca-2
+key_usage:
+- KeyEncipherment
+- DigitalSignature
+---
+subject: cn=untrusted-client
+ca: false
+key_usage:
+- KeyEncipherment
+- DigitalSignature
