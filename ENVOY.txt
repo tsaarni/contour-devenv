@@ -6,7 +6,7 @@ export WORKDIR=~/work/contour-devenv
 
 # copy vscode settings
 mkdir .vscode
-cp $WORKDIR/c_cpp_properties.json $WORKDIR/launch.json .vscode/
+cp $WORKDIR/configs/c_cpp_properties.json $WORKDIR/configs/launch.json .vscode/
 
 
 # Toolchain instructions from here
@@ -16,15 +16,9 @@ https://github.com/envoyproxy/envoy/blob/master/bazel/README.md
 echo "build --config=clang" >> user.bazelrc
 
 # install and setup clang
-wget http://releases.llvm.org/9.0.0/clang+llvm-9.0.0-x86_64-pc-linux-gnu.tar.xz
-sudo mkdir /usr/local/clang-9.0.0
-sudo tar xf clang+llvm-9.0.0-x86_64-pc-linux-gnu.tar.xz -C/usr/local/
-bazel/setup_clang.sh /usr/local/clang+llvm-9.0.0-x86_64-pc-linux-gnu/
-
-### there will be error WHICH CAN BE IGNORED
-###   /usr/local/clang+llvm-9.0.0-x86_64-pc-linux-gnu/bin/llvm-config:
-###   error while loading shared libraries: libz3.so.4.8: cannot open shared object file: No such file or directory
-
+wget https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0/clang+llvm-11.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz
+sudo tar xf clang+llvm-11.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz -C/usr/local/
+bazel/setup_clang.sh /usr/local/clang+llvm-11.0.0-x86_64-linux-gnu-ubuntu-20.04/
 
 
 # generate compile_commands.json
@@ -47,7 +41,7 @@ certyaml --destination certs configs/certs.yaml
 # BUILDING
 #
 
-# Development builds
+# Local development builds (first see above for clang install)
 
 bazel build -c fastbuild //source/exe:envoy-static
 bazel build -c fastbuild -s //source/exe:envoy-static    # use -s to see compile commands
@@ -66,7 +60,7 @@ target remote localhost:9999
 
 # package as docker image
 cp -af bazel-bin/source/exe/envoy-static $WORKDIR/docker/envoy/envoy
-cp -af bazel-bin/source/restarter/restarter $WORKDIR/docker/envoy/restarter
+###cp -af bazel-bin/source/restarter/restarter $WORKDIR/docker/envoy/restarter
 docker build -f $WORKDIR/docker/envoy/Dockerfile $WORKDIR/docker/envoy -t envoy:latest
 kind load docker-image envoy:latest --name contour  # upload image to kind cluster
 
@@ -81,15 +75,19 @@ kind load docker-image envoy:latest --name contour  # upload image to kind clust
 # Release builds
 
 # start bazel cache in one terminal and then build with --remote_http_cache
-docker run -v $HOME/.cache/bazel-remote-cache:/data -p 28080:8080 buchgr/bazel-remote-cache
+mkdir -p ~/.cache/bazel-remote-cache
+docker run -v $HOME/.cache/bazel-remote-cache:/data -u $(id -u):$(id -g) -p 28080:8080 buchgr/bazel-remote-cache
 
 # build release
 ci/run_envoy_docker.sh "BAZEL_BUILD_EXTRA_OPTIONS='--remote_http_cache=http://127.0.0.1:28080' ./ci/do_ci.sh bazel.release.server_only"  # without test
 ci/run_envoy_docker.sh "BAZEL_BUILD_EXTRA_OPTIONS='--remote_http_cache=http://127.0.0.1:28080' ./ci/do_ci.sh bazel.release"              # with test
 
-# create container
-docker build -f ci/Dockerfile-envoy-image -t envoy .   # only ubuntu image
-ci/docker_build.sh                                     # all images
+# build devel
+./ci/run_envoy_docker.sh "BAZEL_BUILD_EXTRA_OPTIONS='--remote_http_cache=http://127.0.0.1:28080' ./ci/do_ci.sh bazel.dev"
+
+
+docker build -f ci/Dockerfile-envoy -t envoy .   # only ubuntu image
+ci/docker_build.sh                               # all images
 
 
 # run tests without IPv6

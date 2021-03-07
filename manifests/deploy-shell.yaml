@@ -17,3 +17,19 @@ spec:
         - name: shell
           image: ubuntu:18.04
           command: ["sleep", "99999999"]
+          volumeMounts:
+          - mountPath: /run/secrets/certs/
+            name: client-cert
+            readOnly: true
+          - mountPath: /run/secrets/ca
+            name: ca-cert
+            readOnly: true
+      volumes:
+      - name: client-cert
+        secret:
+          secretName: client
+          optional: true
+      - name: ca-cert
+        secret:
+          secretName: internal-root-ca
+          optional: true

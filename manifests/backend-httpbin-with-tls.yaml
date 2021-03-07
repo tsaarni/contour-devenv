@@ -5,6 +5,7 @@ metadata:
   labels:
     app: httpbin
 spec:
+  replicas: 1
   selector:
     matchLabels:
       app: httpbin
@@ -27,6 +28,9 @@ spec:
         - mountPath: /run/secrets/certs/
           name: httpbin-cert
           readOnly: true
+        - mountPath: /run/secrets/ca
+          name: ca-cert
+          readOnly: true
         command: ["/bin/sh"]
         # Configure Gunicorn HTTP server to terminate TLS
         #   - server certificate and key
@@ -36,18 +40,21 @@ spec:
         #     --cert-reqs 2 == ssl.CERT_REQUIRED
         args:
           - "-c"
-          - "gunicorn -b 0.0.0.0:443 --access-logfile - --cert-reqs 0 --certfile /run/secrets/certs/httpbin.pem --keyfile /run/secrets/certs/httpbin-key.pem httpbin:app -k gevent"
+          - "hypercorn -b 0.0.0.0:443 --access-logfile - --cert-reqs 2 --ca-cert /run/secrets/ca/ca.crt --certfile /run/secrets/certs/httpbin.pem --keyfile /run/secrets/certs/httpbin-key.pem httpbin:asyncio_app -k asyncio"
       volumes:
       - name: httpbin-cert
         secret:
           secretName: httpbin
+      - name: ca-cert
+        secret:
+          secretName: internal-root-ca
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: httpbin
   annotations:
-    projectcontour.io/upstream-protocol.tls: "443,https"
+#    projectcontour.io/upstream-protocol.h2: "443"
   labels:
     app: httpbin
 spec:
@@ -70,6 +77,7 @@ spec:
     - services:
         - name: httpbin
           port: 443
+          protocol: h2
           validation:
             caSecret: internal-root-ca
             subjectName: httpbin
