@@ -6,7 +6,7 @@ export WORKDIR=~/work/contour-devenv
 
 # copy vscode settings
 mkdir .vscode
-cp $WORKDIR/configs/c_cpp_properties.json $WORKDIR/configs/launch.json .vscode/
+cp $WORKDIR/configs/launch.json .vscode/
 
 
 # Toolchain instructions from here
@@ -20,9 +20,13 @@ wget https://github.com/llvm/llvm-project/releases/download/llvmorg-11.0.0/clang
 sudo tar xf clang+llvm-11.0.0-x86_64-linux-gnu-ubuntu-20.04.tar.xz -C/usr/local/
 bazel/setup_clang.sh /usr/local/clang+llvm-11.0.0-x86_64-linux-gnu-ubuntu-20.04/
 
+# setup git hooks
+./support/bootstrap
 
 # generate compile_commands.json
-./tools/gen_compilation_database.py
+#./tools/gen_compilation_database.py
+tools/vscode/refresh_compdb.sh
+
 
 # fix code formatting before commit
 ./tools/code_format/check_format.py fix
@@ -68,6 +72,11 @@ kind load docker-image envoy:latest --name contour  # upload image to kind clust
 
 
 
+# updating docs
+export ENVOY_SRCDIR=$PWD
+docs/build.sh
+SPHINX_SKIP_CONFIG_VALIDATION=true docs/build.sh
+google-chrome generated/docs/index.html
 
 
 
@@ -214,8 +223,17 @@ kubectl delete pod -lapp=control-plane
 
 
 # unittest with bazel
+bazel test -c dbg //test/extensions/formatter/req_without_query:req_without_query_test --test_output=streamed --test_arg="-l trace"
 bazel test -c dbg //test/common/filesystem:watcher_impl_test --test_output=streamed --test_arg="-l trace"
-
 bazel test -c dbg //test/... --test_output=streamed  # run all unittests
 bazel test -c dbg --config=clang-asan //test/...     # address sanitizer
 bazel test -c dbg --config=clang-tsan //test/...     # thread sanitizer
+
+
+
+
+
+
+docker run --rm --publish 8081:3000 gcr.io/k8s-staging-ingressconformance/echoserver:v20201006-42d00bd
+bazel-bin/source/exe/envoy-static -c $WORKDIR/configs/envoy-static-virtualhost.yaml
+http "http://localhost:8080/foo?supersecret=password"
